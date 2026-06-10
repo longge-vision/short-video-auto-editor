@@ -270,6 +270,18 @@ def write_srt(path: Path, subtitles: list[str], duration: float) -> None:
     path.write_text("\n".join(chunks), encoding="utf-8")
 
 
+def read_srt_text(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    blocks = re.split(r"\n\s*\n", text.strip())
+    subtitles: list[str] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        payload = [line for line in lines if not re.match(r"^\d+$", line) and "-->" not in line]
+        if payload:
+            subtitles.append(clean(" ".join(payload)))
+    return subtitles
+
+
 def create_slideshow(ffmpeg: str, images: list[Path], output: Path, duration: float, size: str, fps: int) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if not images:
@@ -436,6 +448,7 @@ def main() -> int:
     parser.add_argument("--voice")
     parser.add_argument("--video")
     parser.add_argument("--script")
+    parser.add_argument("--srt")
     parser.add_argument("--subtitles", nargs="*")
     parser.add_argument("--images-dir")
     parser.add_argument("--image", action="append", default=[])
@@ -452,6 +465,7 @@ def main() -> int:
     voice = Path(args.voice) if args.voice else None
     video = Path(args.video) if args.video else None
     script = Path(args.script) if args.script else None
+    srt = Path(args.srt) if args.srt else None
     music = Path(args.music) if args.music else None
     output = Path(args.output)
     if not voice and not video:
@@ -463,7 +477,8 @@ def main() -> int:
 
     script_data = parse_script(script)
     title = clean(str(script_data.get("cover") or script_data.get("title") or "短视频"))
-    subtitles = [clean(s) for s in (args.subtitles or []) if clean(s)]
+    subtitles = read_srt_text(srt) if srt and srt.exists() else []
+    subtitles.extend([clean(s) for s in (args.subtitles or []) if clean(s)])
     if not subtitles:
         subtitles = [str(s) for s in script_data.get("subtitles", []) if clean(str(s))]
     duration_source = video or voice
