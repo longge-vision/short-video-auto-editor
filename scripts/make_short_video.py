@@ -92,12 +92,19 @@ def parse_script(path: Path | None) -> dict[str, object]:
     text = path.read_text(encoding="utf-8")
     title = ""
     subtitles: list[str] = []
+    title_options: list[str] = []
     tts = ""
     cover = ""
 
     title_match = re.search(r"^1\.\s*(.+)$", text, flags=re.M)
     if title_match:
         title = clean(title_match.group(1))
+    title_block = re.search(r"^##\s*标题备选\s*\n(?P<body>.*?)(?=^##\s+|\Z)", text, flags=re.M | re.S)
+    if title_block:
+        for line in title_block.group("body").splitlines():
+            match = re.match(r"\s*\d+[.、]\s*(.+)$", line)
+            if match:
+                title_options.append(clean(match.group(1)))
     cover_match = re.search(r"^##\s*封面字\s*\n(?P<body>.*?)(?=^##\s+|\Z)", text, flags=re.M | re.S)
     if cover_match:
         cover = clean(cover_match.group("body"))
@@ -110,7 +117,7 @@ def parse_script(path: Path | None) -> dict[str, object]:
             match = re.match(r"\s*\d+[.、]\s*(.+)$", line)
             if match:
                 subtitles.append(clean(match.group(1)))
-    return {"title": title or cover or "短视频", "cover": cover or title, "subtitles": subtitles, "tts": tts}
+    return {"title": title or cover or "短视频", "cover": cover or title, "subtitles": subtitles, "tts": tts, "title_options": title_options}
 
 
 def collect_images(images_dir: Path | None, explicit: list[str]) -> list[Path]:
@@ -124,6 +131,81 @@ def collect_images(images_dir: Path | None, explicit: list[str]) -> list[Path]:
             if p.suffix.lower() in IMAGE_EXTS and p not in images:
                 images.append(p)
     return images[:12]
+
+
+def wrap_text(draw, text: str, font, max_width: int) -> list[str]:
+    words = list(text)
+    lines: list[str] = []
+    current = ""
+    for ch in words:
+        candidate = current + ch
+        bbox = draw.textbbox((0, 0), candidate, font=font)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = ch
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_text_card(path: Path, title: str, subtitle: str, tag: str, accent: tuple[int, int, int]) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    w, h = 1080, 1920
+    img = Image.new("RGB", (w, h), (14, 18, 24))
+    draw = ImageDraw.Draw(img)
+    for y in range(h):
+        ratio = y / h
+        color = (
+            int(14 + accent[0] * 0.18 * ratio),
+            int(18 + accent[1] * 0.18 * ratio),
+            int(24 + accent[2] * 0.18 * ratio),
+        )
+        draw.line((0, y, w, y), fill=color)
+    font_path = "C:/Windows/Fonts/msyh.ttc"
+    title_font = ImageFont.truetype(font_path, 78)
+    sub_font = ImageFont.truetype(font_path, 45)
+    tag_font = ImageFont.truetype(font_path, 34)
+    small_font = ImageFont.truetype(font_path, 30)
+
+    draw.rounded_rectangle((72, 120, 380, 190), radius=18, fill=accent)
+    draw.text((96, 136), tag, font=tag_font, fill=(255, 255, 255))
+    draw.rectangle((72, 300, 92, 900), fill=accent)
+
+    y = 310
+    for line in wrap_text(draw, title, title_font, 820)[:5]:
+        draw.text((124, y), line, font=title_font, fill=(255, 255, 255))
+        y += 100
+    y += 34
+    for line in wrap_text(draw, subtitle, sub_font, 850)[:7]:
+        draw.text((124, y), line, font=sub_font, fill=(220, 232, 242))
+        y += 66
+
+    draw.rounded_rectangle((72, 1550, 1008, 1690), radius=28, outline=(95, 110, 130), width=2)
+    draw.text((112, 1586), "工业视觉 / 异常检测 / 可落地论文", font=small_font, fill=(190, 205, 220))
+    draw.text((112, 1632), "视频号 · 抖音短视频版", font=small_font, fill=(190, 205, 220))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path, quality=95)
+
+
+def build_auto_cards(tmp: Path, script_data: dict[str, object]) -> list[Path]:
+    title = clean(str(script_data.get("cover") or script_data.get("title") or "短视频"))
+    subtitles = [clean(str(s)) for s in script_data.get("subtitles", []) if clean(str(s))]
+    cards = [
+        ("开场", title, subtitles[0] if subtitles else "先把问题讲清楚，再看方法值不值得复现。", (40, 120, 255)),
+        ("痛点", "为什么工业缺陷检测难？", "缺陷样本少、换光照不稳、误报漏报都会影响产线复核。", (235, 90, 70)),
+        ("方法", "这篇论文看什么？", "重点看正常外观怎么建模、异常响应怎么生成、热力图是否可用。", (48, 170, 120)),
+        ("实验", "不要只看平均分", "还要看 MVTec、VAND 等数据集上的跨工况表现和失败案例。", (160, 110, 240)),
+        ("结论", "适合放进方案池对比", "真正落地前，要复核误报、漏报、热力图和部署成本。", (238, 160, 54)),
+    ]
+    out: list[Path] = []
+    for idx, (tag, card_title, subtitle, accent) in enumerate(cards, 1):
+        path = tmp / f"auto_card_{idx:02d}.jpg"
+        render_text_card(path, card_title, subtitle, tag, accent)
+        out.append(path)
+    return out
 
 
 def escape_ass(text: str) -> str:
@@ -211,45 +293,64 @@ def create_slideshow(ffmpeg: str, images: list[Path], output: Path, duration: fl
             raise RuntimeError(result.stderr)
         return
 
-    per_image = max(2.0, duration / len(images))
+    per_image = max(3.0, duration / len(images))
+    segment_paths: list[Path] = []
+    for idx, image in enumerate(images):
+        segment = output.with_name(f"{output.stem}_segment_{idx:03d}.mp4")
+        segment_paths.append(segment)
+        vf = (
+            f"scale={size}:force_original_aspect_ratio=increase,"
+            f"crop={size},setsar=1,fps={fps},format=yuv420p"
+        )
+        result = run(
+            [
+                ffmpeg,
+                "-y",
+                "-loop",
+                "1",
+                "-t",
+                f"{per_image:.3f}",
+                "-i",
+                str(image),
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "veryfast",
+                str(segment),
+            ],
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr)
     concat = output.with_suffix(".concat.txt")
-    lines = []
-    for image in images:
-        lines.append(f"file '{image.as_posix()}'")
-        lines.append(f"duration {per_image:.3f}")
-    lines.append(f"file '{images[-1].as_posix()}'")
-    concat.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    zoom_size = size.replace(":", "x")
-    vf = (
-        f"scale={size}:force_original_aspect_ratio=increase,"
-        f"crop={size},setsar=1,"
-        f"zoompan=z='min(zoom+0.0008,1.05)':d=1:s={zoom_size}:fps={fps},"
-        f"format=yuv420p"
+    concat.write_text("\n".join(f"file '{p.as_posix()}'" for p in segment_paths) + "\n", encoding="utf-8")
+    result = run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat),
+            "-t",
+            f"{duration:.3f}",
+            "-c",
+            "copy",
+            str(output),
+        ],
+        timeout=900,
     )
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat),
-        "-t",
-        f"{duration:.3f}",
-        "-vf",
-        vf,
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        str(output),
-    ]
-    result = run(cmd, timeout=900)
-    try:
-        concat.unlink()
-    except FileNotFoundError:
-        pass
+    for path in [concat, *segment_paths]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
 
@@ -344,6 +445,7 @@ def main() -> int:
     parser.add_argument("--size", default="1080:1920")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--ffmpeg")
+    parser.add_argument("--no-auto-cards", action="store_true")
     args = parser.parse_args()
 
     ffmpeg = find_ffmpeg(args.ffmpeg)
@@ -370,9 +472,20 @@ def main() -> int:
     duration = min(duration, 90.0)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    images = collect_images(Path(args.images_dir) if args.images_dir else None, args.image)
     with tempfile.TemporaryDirectory(prefix="short_video_") as tmpdir:
         tmp = Path(tmpdir)
+        images = collect_images(Path(args.images_dir) if args.images_dir else None, args.image)
+        if not args.no_auto_cards:
+            cards = build_auto_cards(tmp, script_data)
+            if images:
+                mixed: list[Path] = []
+                for idx, card in enumerate(cards):
+                    mixed.append(card)
+                    if idx < len(images):
+                        mixed.append(images[idx])
+                images = mixed + images[len(cards):]
+            else:
+                images = cards
         ass = tmp / "subtitles.ass"
         write_ass(ass, subtitles, duration, title)
         write_srt(output.with_suffix(".srt"), subtitles, duration)
