@@ -40,12 +40,29 @@ python C:\Users\User\.codex\skills\short-video-auto-editor\scripts\make_short_vi
   --output "path\to\out.mp4"
 ```
 
+For paper/article images as the main slideshow with the talking head in a circular
+bottom-right picture-in-picture:
+
+```powershell
+python C:\Users\User\.codex\skills\short-video-auto-editor\scripts\make_short_video.py `
+  --video "path\to\recording.mp4" `
+  --script "path\to\article.short-video.md" `
+  --images-dir "path\to\paper-images" `
+  --output "path\to\out.mp4" `
+  --pip-video `
+  --pip-size 292
+```
+
+When only one large paper figure is available, the script creates overview and
+cropped focus frames automatically so the video does not stay visually static.
+
 ## Output
 
 - 9:16 MP4, default `1080x1920`.
 - Burned Chinese subtitles.
 - Title card at the beginning.
 - Image slideshow / B-roll from article figures.
+- Optional circular talking-head PiP over the paper/article slideshow.
 - Optional background music mixed under narration.
 - `.srt` subtitle file beside the output.
 
