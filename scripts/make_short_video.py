@@ -133,6 +133,60 @@ def collect_images(images_dir: Path | None, explicit: list[str]) -> list[Path]:
     return images[:12]
 
 
+def parse_size(value: str) -> tuple[int, int]:
+    match = re.match(r"^\s*(\d+)\s*[:x]\s*(\d+)\s*$", value)
+    if not match:
+        return 1080, 1920
+    return int(match.group(1)), int(match.group(2))
+
+
+def render_image_on_canvas(src, dst, canvas_size: tuple[int, int], margin: int = 54) -> None:
+    from PIL import Image
+
+    canvas_w, canvas_h = canvas_size
+    canvas = Image.new("RGB", canvas_size, (250, 250, 248))
+    src = src.convert("RGB")
+    max_w = canvas_w - margin * 2
+    max_h = canvas_h - 360
+    scale = min(max_w / src.width, max_h / src.height)
+    new_size = (max(1, int(src.width * scale)), max(1, int(src.height * scale)))
+    resized = src.resize(new_size, Image.Resampling.LANCZOS)
+    x = (canvas_w - resized.width) // 2
+    y = 80 + max(0, (max_h - resized.height) // 2)
+    canvas.paste(resized, (x, y))
+    canvas.save(dst, quality=95)
+
+
+def build_paper_focus_frames(tmp: Path, images: list[Path], size: str) -> list[Path]:
+    from PIL import Image
+
+    canvas_size = parse_size(size)
+    frames: list[Path] = []
+    for img_idx, path in enumerate(images[:4], 1):
+        try:
+            src = Image.open(path)
+        except Exception:
+            continue
+        w, h = src.size
+        boxes = [
+            (0, 0, w, h),
+            (0, 0, max(1, int(w * 0.55)), h),
+            (int(w * 0.45), 0, w, h),
+            (int(w * 0.18), 0, int(w * 0.82), h),
+        ]
+        seen: set[tuple[int, int, int, int]] = set()
+        for box_idx, box in enumerate(boxes, 1):
+            left, top, right, bottom = box
+            if right <= left or bottom <= top or box in seen:
+                continue
+            seen.add(box)
+            crop = src.crop(box)
+            out = tmp / f"paper_focus_{img_idx:02d}_{box_idx:02d}.jpg"
+            render_image_on_canvas(crop, out, canvas_size)
+            frames.append(out)
+    return frames or images
+
+
 def wrap_text(draw, text: str, font, max_width: int) -> list[str]:
     words = list(text)
     lines: list[str] = []
@@ -441,6 +495,82 @@ def compose_video(
         raise RuntimeError(result.stderr)
 
 
+def compose_pip_video(
+    ffmpeg: str,
+    base_video: Path,
+    pip_video: Path,
+    music: Path | None,
+    ass: Path,
+    output: Path,
+    duration: float,
+    size: str,
+    fps: int,
+    pip_size: int,
+) -> None:
+    inputs = ["-i", str(base_video), "-i", str(pip_video)]
+    music_index = None
+    if music:
+        inputs += ["-i", str(music)]
+        music_index = 2
+    margin = 54
+    border = 8
+    border_size = pip_size + border * 2
+    x = f"W-w-{margin}"
+    y = f"H-h-430"
+    border_x = f"W-w-{margin - border}"
+    border_y = f"H-h-430-{border}"
+    radius = pip_size / 2
+    border_radius = border_size / 2
+    filters = [
+        f"[0:v]scale={size}:force_original_aspect_ratio=increase,crop={size},setsar=1,fps={fps}[bg]",
+        f"[1:v]scale={pip_size}:{pip_size}:force_original_aspect_ratio=increase,crop={pip_size}:{pip_size},setsar=1[pipsq]",
+        f"color=c=white:s={border_size}x{border_size}:d={duration},format=rgba[borderbase]",
+        f"color=c=black:s={border_size}x{border_size}:d={duration},format=gray,geq=lum='if(lte((X-{border_radius})*(X-{border_radius})+(Y-{border_radius})*(Y-{border_radius}),{border_radius * border_radius}),255,0)'[bordermask]",
+        "[borderbase][bordermask]alphamerge[borderround]",
+        f"color=c=black:s={pip_size}x{pip_size}:d={duration},format=gray,geq=lum='if(lte((X-{radius})*(X-{radius})+(Y-{radius})*(Y-{radius}),{radius * radius}),255,0)'[mask]",
+        "[pipsq]format=rgba[piprgba]",
+        "[piprgba][mask]alphamerge[pipround]",
+        f"[bg][borderround]overlay={border_x}:{border_y}:format=auto[withborder]",
+        f"[withborder][pipround]overlay={x}:{y}:format=auto,ass='{ass_filter_path(ass)}'[v]",
+    ]
+    filter_complex = ";".join(filters)
+    if music_index is not None:
+        filter_complex += (
+            f";[1:a]volume=1.0[a0];[{music_index}:a]volume=0.12,aloop=loop=-1:size=2e+09[a1];"
+            "[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]"
+        )
+        cmd = [ffmpeg, "-y", *inputs, "-t", f"{duration:.3f}", "-filter_complex", filter_complex]
+        cmd += [
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+        ]
+    else:
+        cmd = [ffmpeg, "-y", *inputs, "-t", f"{duration:.3f}", "-filter_complex", filter_complex]
+        cmd += ["-map", "[v]", "-map", "1:a"]
+    cmd += [
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+    result = run(cmd, timeout=1200)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -459,6 +589,8 @@ def main() -> int:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--ffmpeg")
     parser.add_argument("--no-auto-cards", action="store_true")
+    parser.add_argument("--pip-video", action="store_true", help="Use --video as a circular talking-head overlay on image/card slideshow")
+    parser.add_argument("--pip-size", type=int, default=300)
     args = parser.parse_args()
 
     ffmpeg = find_ffmpeg(args.ffmpeg)
@@ -493,24 +625,33 @@ def main() -> int:
         if not args.no_auto_cards:
             cards = build_auto_cards(tmp, script_data)
             if images:
+                paper_frames = build_paper_focus_frames(tmp, images, args.size)
                 mixed: list[Path] = []
-                for idx, card in enumerate(cards):
-                    mixed.append(card)
-                    if idx < len(images):
-                        mixed.append(images[idx])
-                images = mixed + images[len(cards):]
+                if cards:
+                    mixed.append(cards[0])
+                for idx, frame in enumerate(paper_frames):
+                    mixed.append(frame)
+                    card_idx = idx + 1
+                    if card_idx < len(cards) and (idx + 1) % 2 == 0:
+                        mixed.append(cards[card_idx])
+                images = mixed
             else:
                 images = cards
         ass = tmp / "subtitles.ass"
         write_ass(ass, subtitles, duration, title)
         write_srt(output.with_suffix(".srt"), subtitles, duration)
         base = tmp / "base.mp4"
-        if video is None:
+        if video is None or args.pip_video:
             create_slideshow(ffmpeg, images, base, duration, args.size, args.fps)
             source_video = None
         else:
             source_video = video
-        compose_video(ffmpeg, base, voice, source_video, music, ass, output, duration, args.size, args.fps)
+        if args.pip_video:
+            if not video:
+                raise RuntimeError("--pip-video requires --video")
+            compose_pip_video(ffmpeg, base, video, music, ass, output, duration, args.size, args.fps, args.pip_size)
+        else:
+            compose_video(ffmpeg, base, voice, source_video, music, ass, output, duration, args.size, args.fps)
     print(str(output))
     return 0
 
